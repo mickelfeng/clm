@@ -88,20 +88,19 @@ static void php_clm_init_globals(zend_clm_globals *clm_globals)
 
 #define CLM_HT_DTOR clm_hash_destructor
 
+void clm_hash_destructor(void *pDest){
+}
 static int clm_init_cache_ht()
 {
+	ALLOC_HASHTABLE(CLM_G(cache_ht));
 	zend_hash_init(CLM_G(cache_ht), 0, NULL, CLM_HT_DTOR, 1);
-	array_init(CLM_G(cache_ht));
-}
-
-int clm_hash_destructor(HashTable *ht){
 }
 
 /* {{{ PHP_MINIT_FUNCTION
  */
 PHP_MINIT_FUNCTION(clm)
 {
-	clm_init_cached();
+	clm_init_cache_ht();
 	/* If you have INI entries, uncomment these lines 
 	REGISTER_INI_ENTRIES();
 	*/
@@ -167,14 +166,12 @@ PHP_FUNCTION(clm_set)
 	char *key;
 	int key_len, ret;
 	zval *val;
-	smart_str buf = {0};
-	php_serialize_data_t var_hash;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sz", &key, &key_len, &val) == FAILURE) {
 		return;
 	}
 
-	ret = clm_add(CLM_G(cache_ht), key, key_len, val_tmp);
+	ret = clm_cache_set(CLM_G(cache_ht), key, key_len, val);
 	if (ret == SUCCESS){
 		RETURN_TRUE;
 	} else {
@@ -192,7 +189,7 @@ PHP_FUNCTION(clm_get)
 		return;
 	}
 
-	ret = zend_hash_find(Z_ARRVAL_P(CLM_G(cache_ht)), key, key_len, (void **)&val);
+	ret = zend_hash_find(CLM_G(cache_ht), key, key_len, (void **)&val);
 
 	RETURN_ZVAL(val, 1, 0);
 }
@@ -218,7 +215,6 @@ clm_ele *clm_make_ele_from_zval(zval *zval)
 	ele->type = Z_TYPE_P(zval);
 	switch (Z_TYPE_P(zval) & IS_CONSTANT_TYPE_MASK){
 		case IS_NULL:
-			ele->value.lval = Z_NULL;
 			break;
 		case IS_LONG:
 			ele->value.lval = Z_LVAL_P(zval);
@@ -231,10 +227,11 @@ clm_ele *clm_make_ele_from_zval(zval *zval)
 			break;
 		case IS_ARRAY:
 			ele->value.ht = Z_ARRVAL_P(zval);
+			/* TODO 遍历构造值 */
 			break;
 		case IS_STRING:
-			ele->value.len = Z_STRLEN_P(zval);
-			ele->value.str = pestrndup(Z_STRVAL_P(zval), Z_STRLEN_P(zval), 1);
+			ele->value.str.len = Z_STRLEN_P(zval);
+			ele->value.str.val = pestrndup(Z_STRVAL_P(zval), Z_STRLEN_P(zval), 1);
 			break;
 	}
 	return ele;
@@ -242,33 +239,45 @@ clm_ele *clm_make_ele_from_zval(zval *zval)
 
 zval *clm_make_zval_from_ele(clm_ele *ele)
 {
-	zval *zval;
-	MAKE_STD_ZVAL(zval);
-	Z_TYPE_P(zval) = ele->type;
+	zval *val;
 
-	switch(Z_TYPE_P(zval) & IS_CONSTANT_TYPE_MASK){
+	zval *arr;
+	clm_ele *tmp_ele;
+	zval *tmp_zval;
+	char *key;
+
+	MAKE_STD_ZVAL(val);
+	Z_TYPE_P(val) = ele->type;
+
+	switch(Z_TYPE_P(val) & IS_CONSTANT_TYPE_MASK){
 		case IS_NULL:
-			ZVAL_NULL(zval);
+			ZVAL_NULL(val);
 			break;
 		case IS_LONG:
 			break;
 		case IS_BOOL:
-			ZVAL_LONG(zval, ele->value.lval);
+			ZVAL_LONG(val, ele->value.lval);
 			break;
 		case IS_DOUBLE:
-			ZVAL_DOUBLE(zval, ele->value.dval);
+			ZVAL_DOUBLE(val, ele->value.dval);
 			break;
 		case IS_ARRAY:
-			zval *arr;
+
 			MAKE_STD_ZVAL(arr);
 			array_init(arr);
 			/* TODO 遍历:递归 */
+			zend_hash_internal_pointer_reset(ele->value.ht);
+			while (!EG(exception) && zend_hash_get_current_data(ele->value.ht, (void **)&tmp_ele) == SUCCESS) {
+				zend_hash_get_current_key(ele->value.ht, &key, NULL, 0);
+				tmp_zval = clm_make_zval_from_ele(tmp_ele);
+				add_assoc_zval(arr, key, tmp_zval);
+			}
 			break;
 		case IS_STRING:
-			ZVAL_STRINGL(zval, ele->value.str.val, ele->value.str.len, 1);
+			ZVAL_STRINGL(val, ele->value.str.val, ele->value.str.len, 1);
 			break;
 	}
-	}
+	return val;
 }
 
 int clm_cache_set(HashTable *ht, const char *key, int key_len, zval *v)
@@ -277,24 +286,22 @@ int clm_cache_set(HashTable *ht, const char *key, int key_len, zval *v)
 	clm_ele *ele;
 
 	/* 寻找当前的真实key */
-	for (real_key = key + key_len - 1; real_key >= key && real_key - 1 != '.'; real_key --);
+	real_key = key + key_len - 1;
+	if (*real_key == '.'){
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "key must not end with .");
+	}
+	for (; real_key >= key && *real_key != '.'; real_key --);
+	real_key ++;
 
 	switch (Z_TYPE_P(v) & IS_CONSTANT_TYPE_MASK){
 		case IS_NULL:
-			ele = clm_make_ele_from_zval(v);
-			zend_hash_update(ht, real_key, key + key_len - real_key, ele, sizeof(clm_ele), NULL);
-			break;
 		case IS_LONG:
+		case IS_DOUBLE:
+		case IS_BOOL:
+		case IS_ARRAY:
+		case IS_STRING:
 			ele = clm_make_ele_from_zval(v);
 			zend_hash_update(ht, real_key, key + key_len - real_key, ele, sizeof(clm_ele), NULL);
-			break;
-		case IS_DOUBLE:
-			break;
-		case IS_BOOL:
-			break;
-		case IS_ARRAY:
-			break;
-		case IS_STRING:
 			break;
 		case IS_RESOURCE:
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "clm_set don't support resource type, error key is [%s]", key);
