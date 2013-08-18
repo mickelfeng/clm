@@ -13,9 +13,9 @@ dnl [  --with-clm             Include clm support])
 
 dnl Otherwise use enable:
 
-dnl PHP_ARG_ENABLE(clm, whether to enable clm support,
-dnl Make sure that the comment is aligned:
-dnl [  --enable-clm           Enable clm support])
+PHP_ARG_ENABLE(clm, whether to enable clm support,
+Make sure that the comment is aligned:
+[  --enable-clm           Enable clm support])
 
 if test "$PHP_CLM" != "no"; then
   dnl Write more examples of tests here...

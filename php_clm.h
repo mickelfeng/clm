@@ -42,17 +42,13 @@ PHP_RINIT_FUNCTION(clm);
 PHP_RSHUTDOWN_FUNCTION(clm);
 PHP_MINFO_FUNCTION(clm);
 
-PHP_FUNCTION(confirm_clm_compiled);	/* For testing, remove later. */
+PHP_FUNCTION(clm_set);
+PHP_FUNCTION(clm_get);
 
-/* 
-  	Declare any global variables you may need between the BEGIN
-	and END macros here:     
-
+/* 定义全局变量 */
 ZEND_BEGIN_MODULE_GLOBALS(clm)
-	long  global_value;
-	char *global_string;
+	HashTable *cache_ht;
 ZEND_END_MODULE_GLOBALS(clm)
-*/
 
 /* In every utility function you add that needs to use variables 
    in php_clm_globals, call TSRMLS_FETCH(); after declaring other 
