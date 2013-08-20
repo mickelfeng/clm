@@ -5,7 +5,7 @@ php配置加载管理扩展
 ------------------
 
 <b>做三件事</b><br />
-一. 提供进程本地内存的get/set接口(不支持对象和资源)<br />
+一. 提供进程本地内存的get/set接口(不支持对象和资源)<font color="red">(已完成)</font><br />
     <pre><code>
     bool clm_set(string $key, mixed $value);
     mixed clm_get(string $key);
