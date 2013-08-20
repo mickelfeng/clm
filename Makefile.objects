@@ -1,8 +1,0 @@
-clm.lo: /Users/selfimpr/workspace/opensource/php-5.5.0/ext/clm/clm.c
-	$(LIBTOOL) --mode=compile $(CC)  -I. -I/Users/selfimpr/workspace/opensource/php-5.5.0/ext/clm $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS)  -c /Users/selfimpr/workspace/opensource/php-5.5.0/ext/clm/clm.c -o clm.lo 
-$(phplibdir)/clm.la: ./clm.la
-	$(LIBTOOL) --mode=install cp ./clm.la $(phplibdir)
-
-./clm.la: $(shared_objects_clm) $(CLM_SHARED_DEPENDENCIES)
-	$(LIBTOOL) --mode=link $(CC) $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS) $(LDFLAGS) -o $@ -export-dynamic -avoid-version -prefer-pic -module -rpath $(phplibdir) $(EXTRA_LDFLAGS) $(shared_objects_clm) $(CLM_SHARED_LIBADD)
-

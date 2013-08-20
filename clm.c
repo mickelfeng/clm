@@ -27,6 +27,10 @@
 #include "ext/standard/info.h"
 #include "php_clm.h"
 
+static void clm_zval_dtor(void *pDest);
+static zval *clm_zval_persistent(zval *val);
+static zval *clm_zval_localize(zval *pval, zval *val);
+
 /* 声明全局变量 */
 ZEND_DECLARE_MODULE_GLOBALS(clm)
 
@@ -86,21 +90,12 @@ static void php_clm_init_globals(zend_clm_globals *clm_globals)
 */
 /* }}} */
 
-#define CLM_HT_DTOR clm_hash_destructor
-
-void clm_hash_destructor(void *pDest){
-}
-static int clm_init_cache_ht()
-{
-	ALLOC_HASHTABLE(CLM_G(cache_ht));
-	zend_hash_init(CLM_G(cache_ht), 0, NULL, CLM_HT_DTOR, 1);
-}
-
 /* {{{ PHP_MINIT_FUNCTION
  */
 PHP_MINIT_FUNCTION(clm)
 {
-	clm_init_cache_ht();
+	CLM_G(cache_ht) = (HashTable *)pemalloc(sizeof(HashTable), 1);
+	zend_hash_init(CLM_G(cache_ht), 0, NULL, clm_zval_dtor, 1);
 	/* If you have INI entries, uncomment these lines 
 	REGISTER_INI_ENTRIES();
 	*/
@@ -115,6 +110,7 @@ PHP_MSHUTDOWN_FUNCTION(clm)
 	/* uncomment this line if you have INI entries
 	UNREGISTER_INI_ENTRIES();
 	*/
+	zend_hash_destroy(CLM_G(cache_ht));
 	return SUCCESS;
 }
 /* }}} */
@@ -152,165 +148,196 @@ PHP_MINFO_FUNCTION(clm)
 /* }}} */
 
 
-/* Remove the following function when you have successfully modified config.m4
-   so that your module can be compiled into PHP, it exists only for testing
-   purposes. */
-
-/**
- * clm_set
- * @param string $key
- * @param mixed $value
+/** {{{ proto clm_set(string $key, mixed $value)
+ * local cache set
  */
 PHP_FUNCTION(clm_set)
 {
-	char *key;
+	char *key, *pkey;
 	int key_len, ret;
-	zval *val;
+	zval *val, *pval;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sz", &key, &key_len, &val) == FAILURE) {
 		return;
 	}
 
-	ret = clm_cache_set(CLM_G(cache_ht), key, key_len, val);
-	if (ret == SUCCESS){
-		RETURN_TRUE;
-	} else {
+	pval = clm_zval_persistent(val TSRMLS_CC);
+	if (pval == NULL){
 		RETURN_FALSE;
 	}
+	pkey = pestrndup(key, key_len, 1);
+	if (pkey == NULL){
+		RETURN_FALSE;
+	}
+
+	if (FAILURE == zend_hash_update(CLM_G(cache_ht), pkey, key_len, pval, sizeof(zval), NULL)){
+		RETURN_FALSE;
+	}
+
+	RETURN_TRUE;
 }
+/* }}} */
 
 PHP_FUNCTION(clm_get)
 {
 	char *key;
 	int key_len, ret;
-	zval *val;
+	zval *pval;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &key, &key_len) == FAILURE) {
 		return;
 	}
 
-	ret = zend_hash_find(CLM_G(cache_ht), key, key_len, (void **)&val);
-
-	RETURN_ZVAL(val, 1, 0);
+	if (FAILURE == zend_hash_find(CLM_G(cache_ht), key, key_len, (void **)&pval)){
+		RETURN_FALSE;
+	}
+	if (NULL == clm_zval_localize(pval, return_value)){
+		RETURN_FALSE;
+	}
 }
 
-typedef struct _clm_ele {
-	int type;
-	union {
-		int lval;
-		double dval;
-		HashTable *ht;
-		struct {
-			char *val;
-			int len;
-		} str;
-	} value;
-} clm_ele;
-
-clm_ele *clm_make_ele_from_zval(zval *zval)
-{
-	clm_ele *ele;
-
-	ele = pemalloc(sizeof(clm_ele), 1);
-	ele->type = Z_TYPE_P(zval);
-	switch (Z_TYPE_P(zval) & IS_CONSTANT_TYPE_MASK){
-		case IS_NULL:
-			break;
-		case IS_LONG:
-			ele->value.lval = Z_LVAL_P(zval);
-			break;
-		case IS_BOOL:
-			ele->value.lval = Z_BVAL_P(zval);
-			break;
-		case IS_DOUBLE:
-			ele->value.dval = Z_DVAL_P(zval);
+/** {{{ destructor for persistent zval of clm local cache
+ */
+static void clm_zval_dtor(void *pDest) {
+	zval *val;
+	val = (zval *)pDest;
+	switch (Z_TYPE_P(val) & IS_CONSTANT_TYPE_MASK){
+		case IS_STRING:
+			CHECK_ZVAL_STRING(val);
+			pefree(Z_STRVAL_P(val), 1);
 			break;
 		case IS_ARRAY:
-			ele->value.ht = Z_ARRVAL_P(zval);
-			/* TODO 遍历构造值 */
-			break;
-		case IS_STRING:
-			ele->value.str.len = Z_STRLEN_P(zval);
-			ele->value.str.val = pestrndup(Z_STRVAL_P(zval), Z_STRLEN_P(zval), 1);
+			zend_hash_destroy(Z_ARRVAL_P(val));
+			pefree(Z_ARRVAL_P(val), 1);
 			break;
 	}
-	return ele;
 }
+/* }}} */
 
-zval *clm_make_zval_from_ele(clm_ele *ele)
+/** {{{ persistent zval for clm local cache
+ */
+static zval *clm_zval_persistent(zval *val TSRMLS_DC)
 {
-	zval *val;
+	zval *pval;
 
-	zval *arr;
-	clm_ele *tmp_ele;
-	zval *tmp_zval;
-	char *key;
-
-	MAKE_STD_ZVAL(val);
-	Z_TYPE_P(val) = ele->type;
-
-	switch(Z_TYPE_P(val) & IS_CONSTANT_TYPE_MASK){
-		case IS_NULL:
-			ZVAL_NULL(val);
+	pval = (zval *)pemalloc(sizeof(zval), 1);
+	INIT_PZVAL(pval);
+	
+	switch (Z_TYPE_P(val) & IS_CONSTANT_TYPE_MASK){
+		case IS_BOOL:
+			ZVAL_BOOL(pval, Z_BVAL_P(val));
 			break;
 		case IS_LONG:
-			break;
-		case IS_BOOL:
-			ZVAL_LONG(val, ele->value.lval);
+			ZVAL_LONG(pval, Z_LVAL_P(val));
 			break;
 		case IS_DOUBLE:
-			ZVAL_DOUBLE(val, ele->value.dval);
-			break;
-		case IS_ARRAY:
-
-			MAKE_STD_ZVAL(arr);
-			array_init(arr);
-			/* TODO 遍历:递归 */
-			zend_hash_internal_pointer_reset(ele->value.ht);
-			while (!EG(exception) && zend_hash_get_current_data(ele->value.ht, (void **)&tmp_ele) == SUCCESS) {
-				zend_hash_get_current_key(ele->value.ht, &key, NULL, 0);
-				tmp_zval = clm_make_zval_from_ele(tmp_ele);
-				add_assoc_zval(arr, key, tmp_zval);
-			}
+			ZVAL_DOUBLE(pval, Z_DVAL_P(val));
 			break;
 		case IS_STRING:
-			ZVAL_STRINGL(val, ele->value.str.val, ele->value.str.len, 1);
+			CHECK_ZVAL_STRING(val);
+			Z_TYPE_P(pval) = IS_STRING;
+			Z_STRLEN_P(pval) = Z_STRLEN_P(val);
+			Z_STRVAL_P(pval) = pestrndup(Z_STRVAL_P(val), Z_STRLEN_P(val), 1);
+			break;
+		case IS_ARRAY: {
+			char *str_index;
+			ulong num_index;
+			uint str_index_len;
+			zval **ele_val, *ele_pval;
+
+			Z_TYPE_P(pval) = IS_ARRAY;
+			Z_ARRVAL_P(pval) = (HashTable *)pemalloc(sizeof(HashTable), 1);
+			if (Z_ARRVAL_P(pval) == NULL){
+				return NULL;
+			}
+			zend_hash_init(Z_ARRVAL_P(pval), zend_hash_num_elements(Z_ARRVAL_P(val)), NULL, clm_zval_dtor, 1);
+
+			for (zend_hash_internal_pointer_reset(Z_ARRVAL_P(val));
+					!zend_hash_has_more_elements(Z_ARRVAL_P(val));
+					zend_hash_move_forward(Z_ARRVAL_P(val))){
+				if (FAILURE == zend_hash_get_current_data(Z_ARRVAL_P(val), (void **)&ele_val)){
+					continue;
+				}
+				ele_pval = clm_zval_persistent(*ele_val TSRMLS_CC);
+				if (ele_pval == NULL){
+					continue;
+				}
+				if (HASH_KEY_IS_LONG == zend_hash_get_current_key_ex(Z_ARRVAL_P(val), &str_index, &str_index_len, &num_index, 0, NULL)){
+					zend_hash_index_update(Z_ARRVAL_P(pval), num_index, (void **)&ele_pval, sizeof(zval), NULL);
+				} else {
+					zend_hash_update(Z_ARRVAL_P(pval), str_index, str_index_len, (void **)&ele_pval, sizeof(zval), NULL);
+				}
+			}
+			break;
+		}
+		case IS_NULL:
+		case IS_OBJECT:
+		case IS_RESOURCE:
+			// ignore object and resource
+			ZVAL_NULL(pval);
+			break;
+	}
+	return pval;
+}
+/* }}} */
+
+/** {{{ make a persistent zval localize
+ */
+static zval *clm_zval_localize(zval *pval, zval *val TSRMLS_DC)
+{
+	if (val == NULL){
+		MAKE_STD_ZVAL(val);
+	}
+	
+	switch (Z_TYPE_P(pval) & IS_CONSTANT_TYPE_MASK){
+		case IS_BOOL:
+			ZVAL_BOOL(val, Z_BVAL_P(pval));
+			break;
+		case IS_LONG:
+			ZVAL_LONG(val, Z_LVAL_P(pval));
+			break;
+		case IS_DOUBLE:
+			ZVAL_DOUBLE(val, Z_DVAL_P(pval));
+			break;
+		case IS_STRING:
+			CHECK_ZVAL_STRING(pval);
+			Z_TYPE_P(val) = IS_STRING;
+			Z_STRLEN_P(val) = Z_STRLEN_P(pval);
+			Z_STRVAL_P(val) = estrndup(Z_STRVAL_P(pval), Z_STRLEN_P(val));
+			break;
+		case IS_ARRAY: {
+			char *str_index;
+			ulong num_index;
+			uint str_index_len;
+			zval *ele_val, **ele_pval;
+
+			array_init(val);
+
+			for (zend_hash_internal_pointer_reset(Z_ARRVAL_P(pval));
+					!zend_hash_has_more_elements(Z_ARRVAL_P(pval));
+					zend_hash_move_forward(Z_ARRVAL_P(pval))){
+				if (FAILURE == zend_hash_get_current_data(Z_ARRVAL_P(pval), (void **)&ele_pval)){
+					continue;
+				}
+				ele_val = clm_zval_localize(*ele_pval, NULL TSRMLS_CC);
+				if (ele_val == NULL){
+					continue;
+				}
+				if (HASH_KEY_IS_LONG == zend_hash_get_current_key_ex(Z_ARRVAL_P(pval), &str_index, &str_index_len, &num_index, 0, NULL)){
+					zend_hash_index_update(Z_ARRVAL_P(val), num_index, (void **)&ele_val, sizeof(zval), NULL);
+				} else {
+					zend_hash_update(Z_ARRVAL_P(val), str_index, str_index_len, (void **)&ele_val, sizeof(zval), NULL);
+				}
+			}
+			break;
+		}
+		case IS_NULL:
+			ZVAL_NULL(val);
 			break;
 	}
 	return val;
 }
-
-int clm_cache_set(HashTable *ht, const char *key, int key_len, zval *v)
-{
-	char *real_key;
-	clm_ele *ele;
-
-	/* 寻找当前的真实key */
-	real_key = key + key_len - 1;
-	if (*real_key == '.'){
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "key must not end with .");
-	}
-	for (; real_key >= key && *real_key != '.'; real_key --);
-	real_key ++;
-
-	switch (Z_TYPE_P(v) & IS_CONSTANT_TYPE_MASK){
-		case IS_NULL:
-		case IS_LONG:
-		case IS_DOUBLE:
-		case IS_BOOL:
-		case IS_ARRAY:
-		case IS_STRING:
-			ele = clm_make_ele_from_zval(v);
-			zend_hash_update(ht, real_key, key + key_len - real_key, ele, sizeof(clm_ele), NULL);
-			break;
-		case IS_RESOURCE:
-			php_error_docref(NULL TSRMLS_CC, E_WARNING, "clm_set don't support resource type, error key is [%s]", key);
-			break;
-		case IS_OBJECT:
-			php_error_docref(NULL TSRMLS_CC, E_WARNING, "clm_set don't support object type, error key is [%s]", key);
-			break;
-	}
-}
+/* }}} */
 
 /*
  * Local variables:

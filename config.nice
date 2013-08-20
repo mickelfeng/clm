@@ -1,7 +1,0 @@
-#! /bin/sh
-#
-# Created by configure
-
-'./configure' \
-'--with-php-config=/Users/selfimpr/local/php-5.5.0-debug/bin/php-config' \
-"$@"
