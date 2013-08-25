@@ -21,6 +21,21 @@
 #ifndef PHP_CLM_H
 #define PHP_CLM_H
 
+typedef struct clm_cfg_item_s {
+	char *resource_str;
+	zval *isrefresh_flag;
+	zval *isrefresh_handler;
+	zval *refresh_handler;
+} clm_cfg_item_t;
+
+static void clm_zval_dtor(void *pDest);
+static zval *clm_zval_persistent(zval *val);
+static zval *clm_zval_localize(zval *pval, zval *val);
+static void clm_cfg_item_dtor(void *pDest);
+static int clm_validate_persitent_callable(zval *val);
+static int clm_validate_handler(zval *handler);
+static int clm_cfg_refresh(char *name, int name_len, int force);
+
 extern zend_module_entry clm_module_entry;
 #define phpext_clm_ptr &clm_module_entry
 
@@ -44,10 +59,12 @@ PHP_MINFO_FUNCTION(clm);
 
 PHP_FUNCTION(clm_set);
 PHP_FUNCTION(clm_get);
+PHP_FUNCTION(clm_cfg_register);
 
 /* 定义全局变量 */
 ZEND_BEGIN_MODULE_GLOBALS(clm)
 	HashTable *cache_ht;
+	HashTable *cfg_items_ht;
 ZEND_END_MODULE_GLOBALS(clm)
 
 /* In every utility function you add that needs to use variables 
