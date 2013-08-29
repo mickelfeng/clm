@@ -120,6 +120,14 @@ PHP_MSHUTDOWN_FUNCTION(clm)
  */
 PHP_RINIT_FUNCTION(clm)
 {
+	clm_cfg_item_t *item;
+
+	for (zend_hash_internal_pointer_reset(CLM_G(cfg_items_ht));
+			zend_hash_has_more_elements(CLM_G(cfg_items_ht)) == SUCCESS;
+			zend_hash_move_forward(CLM_G(cfg_items_ht))){
+		zend_hash_get_current_data(CLM_G(cfg_items_ht), (void **)&item);
+		clm_cfg_refresh(NULL, 0, item, 0);
+	}
 	return SUCCESS;
 }
 /* }}} */
@@ -353,16 +361,16 @@ static void clm_cfg_item_dtor(void *pDest) {
 
 /** {{{ refresh specified config item
  */
-static int clm_cfg_refresh(char *name, int name_len, int force) {
-	clm_cfg_item_t *item;
+static int clm_cfg_refresh(char *name, int name_len, clm_cfg_item_t *item, int force) {
 	int need_refresh = 1;
 	zend_fcall_info isrefresh_fci, refresh_fci;
+	zend_fcall_info_cache isrefresh_fcc, refresh_fcc;
 	zval *isrefresh_ret, *refresh_ret;
 	char *is_callable_error;
 	zval **params[1], *isrefresh_flag, *new_isrefresh_flag;
 	zval *new_cfgs;
 
-	if (zend_hash_find(CLM_G(cfg_items_ht), name, name_len, (void **)&item) == FAILURE){
+	if (item == NULL && zend_hash_find(CLM_G(cfg_items_ht), name, name_len, (void **)&item) == FAILURE){
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "config item %s not found", name);
 		return FAILURE;
 	}
@@ -385,7 +393,7 @@ static int clm_cfg_refresh(char *name, int name_len, int force) {
 			}
 
 			/* get function call information of isrefresh_handler */
-			if (zend_fcall_info_init(item->isrefresh_handler, 0, &isrefresh_fci, NULL, NULL, &is_callable_error TSRMLS_CC) == SUCCESS) {
+			if (zend_fcall_info_init(item->isrefresh_handler, 0, &isrefresh_fci, &isrefresh_fcc, NULL, &is_callable_error TSRMLS_CC) == SUCCESS) {
 				if (is_callable_error) {
 					php_error_docref(NULL TSRMLS_CC, E_STRICT, "%s", is_callable_error);
 					efree(is_callable_error);
@@ -404,7 +412,7 @@ static int clm_cfg_refresh(char *name, int name_len, int force) {
 			isrefresh_fci.retval_ptr_ptr = &isrefresh_ret;
 
 			/* call isrefresh_handler */
-			if (zend_call_function(&isrefresh_fci, NULL TSRMLS_CC) == FAILURE) {
+			if (zend_call_function(&isrefresh_fci, &isrefresh_fcc TSRMLS_CC) == FAILURE) {
 				if (isrefresh_ret){
 					zval_dtor(isrefresh_ret);
 				}
@@ -435,7 +443,7 @@ static int clm_cfg_refresh(char *name, int name_len, int force) {
 	}
 
 	/* get function call information of refresh_handler */
-	if (zend_fcall_info_init(item->refresh_handler, 0, &refresh_fci, NULL, NULL, &is_callable_error TSRMLS_CC) == SUCCESS) {
+	if (zend_fcall_info_init(item->refresh_handler, 0, &refresh_fci, &refresh_fcc, NULL, &is_callable_error TSRMLS_CC) == SUCCESS) {
 		if (is_callable_error) {
 			php_error_docref(NULL TSRMLS_CC, E_STRICT, "%s", is_callable_error);
 			efree(is_callable_error);
@@ -454,7 +462,7 @@ static int clm_cfg_refresh(char *name, int name_len, int force) {
 	refresh_fci.retval_ptr_ptr = &refresh_ret;
 
 	/* call refresh handler */
-	if (zend_call_function(&refresh_fci, NULL TSRMLS_CC) == FAILURE) {
+	if (zend_call_function(&refresh_fci, &refresh_fcc TSRMLS_CC) == FAILURE) {
 		if (refresh_ret){
 			zval_dtor(refresh_ret);
 		}
@@ -527,9 +535,11 @@ PHP_FUNCTION(clm_cfg_register)
 	char *resource_idstr, *cfg_key;
 	int resource_idstr_len, cfg_key_len;
 	zval *refresh_handler, *isrefresh_handler;
+	clm_cfg_item_t *item, *old;
+	zval *isrefresh_flag;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sszz", &cfg_key, &cfg_key_len, 
-			&resource_idstr, &resource_idstr_len, &refresh_handler, &isrefresh_handler) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sszz|z", &cfg_key, &cfg_key_len, 
+			&resource_idstr, &resource_idstr_len, &refresh_handler, &isrefresh_handler, &isrefresh_flag) == FAILURE) {
 		RETURN_FALSE;
 	}
 
@@ -543,8 +553,42 @@ PHP_FUNCTION(clm_cfg_register)
 		RETURN_FALSE;
 	}
 
-	/* In first load, We will force refresh one times */
-	if (clm_cfg_refresh(cfg_key, cfg_key_len, 1) == FAILURE){
+	item = pemalloc(sizeof(clm_cfg_item_t), 1);
+	if (item == NULL){
+		RETURN_FALSE;
+	}
+
+	item->resource_str = pestrndup(resource_idstr, resource_idstr_len, 1);
+	if (item->resource_str == NULL){
+		pefree(item, 1);
+		RETURN_FALSE;
+	}
+	if (isrefresh_flag == NULL){
+		MAKE_STD_ZVAL(isrefresh_flag);
+		ZVAL_NULL(isrefresh_flag);
+		if (isrefresh_flag == NULL){
+			RETURN_FALSE;
+		}
+	}
+	item->isrefresh_flag = clm_zval_persistent(isrefresh_flag);
+	item->refresh_handler = clm_zval_persistent(refresh_handler);
+	item->isrefresh_handler = clm_zval_persistent(isrefresh_handler);
+
+	if (zend_hash_update(CLM_G(cfg_items_ht), cfg_key, cfg_key_len, item, sizeof(clm_cfg_item_t), (void **)&old) == FAILURE){
+		clm_cfg_item_dtor(item);
+		pefree(item, 1);
+		RETURN_FALSE;
+	}
+
+	/* In first load, We will force refresh once */
+	if (clm_cfg_refresh(cfg_key, cfg_key_len, NULL, 1) == FAILURE){
+		if (old != NULL){
+			zend_hash_update(CLM_G(cfg_items_ht), cfg_key, cfg_key_len, old, sizeof(clm_cfg_item_t), NULL);
+		} else {
+			zend_hash_del(CLM_G(cfg_items_ht), cfg_key, cfg_key_len);
+		}
+		clm_cfg_item_dtor(item);
+		pefree(item, 1);
 		RETURN_FALSE;
 	}
 

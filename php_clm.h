@@ -34,7 +34,7 @@ static zval *clm_zval_localize(zval *pval, zval *val);
 static void clm_cfg_item_dtor(void *pDest);
 static int clm_validate_persitent_callable(zval *val);
 static int clm_validate_handler(zval *handler);
-static int clm_cfg_refresh(char *name, int name_len, int force);
+static int clm_cfg_refresh(char *name, int name_len, clm_cfg_item_t *item,int force);
 
 extern zend_module_entry clm_module_entry;
 #define phpext_clm_ptr &clm_module_entry
